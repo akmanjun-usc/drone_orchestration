@@ -1,8 +1,5 @@
-# AirSim Python SDK
-# Install from Microsoft's repo if pip version is broken:
-#   pip install msgpack-rpc-python
-#   pip install airsim
-airsim>=1.8.1
+# Project AirSim Python client (replaces airsim package)
+projectairsim
 
 # LLM providers (Phase 4)
 anthropic>=0.30.0

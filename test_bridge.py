@@ -1,11 +1,11 @@
 """
-Phase 1 smoke test.
+Project AirSim Phase 1 smoke test.
 
-Run this with Unreal + AirSim already open:
+Run this with Unreal Engine + Project AirSim plugin active:
     python test_bridge.py
 
 Expected output:
-    Connected to AirSim.
+    Connected. Scene loaded. Drone 'Drone1' ready.
     API control enabled, drone armed.
     Taking off to 3.0 m AGL
     Hover reached at 3.0 m AGL
@@ -14,7 +14,7 @@ Expected output:
     Landing...
     Landed.
     API control disabled, drone disarmed.
-    Disconnected from AirSim.
+    Disconnected from Project AirSim.
     PASS
 """
 
@@ -34,23 +34,18 @@ from drone import primitives as prim
 def run_smoke_test() -> bool:
     try:
         with DroneClient() as client:
-            # Takeoff
             prim.takeoff(client, altitude_m=3.0)
 
-            # Read state
             state = prim.get_state(client)
             print(
                 f"State:  x={state['x']:.2f}  y={state['y']:.2f}  "
-                f"z_agl={state['z_agl']:.2f}  yaw={state['yaw']:.1f}°  "
+                f"z_agl={state['z_agl']:.2f}  yaw={state['yaw']:.1f}  "
                 f"landed={state['is_landed']}"
             )
             assert state["z_agl"] > 1.0, "Drone did not gain altitude"
             assert not state["is_landed"], "Drone reports landed after takeoff"
 
-            # Hover briefly
             prim.hover(client, duration_s=3.0)
-
-            # Land
             prim.land(client)
 
             landed_state = prim.get_state(client)
@@ -61,7 +56,7 @@ def run_smoke_test() -> bool:
 
     except ConnectionError as exc:
         print(f"\nCONNECTION ERROR: {exc}")
-        print("Make sure Unreal Engine is running with the AirSim plugin active.")
+        print("Make sure Unreal Engine is running with the Project AirSim plugin active.")
         return False
 
     except AssertionError as exc:

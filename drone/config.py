@@ -1,6 +1,8 @@
 """
-Simulation and connection configuration.
-Edit this file to match your AirSim / Unreal setup.
+Simulation and connection configuration for Project AirSim.
+
+Project AirSim uses two ports (topics and services) instead of
+the single port used by the original AirSim.
 """
 
 from dataclasses import dataclass
@@ -8,20 +10,27 @@ from dataclasses import dataclass
 
 @dataclass
 class SimConfig:
-    # AirSim connection
+    # Project AirSim connection
     host: str = "127.0.0.1"
-    port: int = 41451
+    port_topics: int = 4760       # pub/sub topic port
+    port_services: int = 4761     # request/response service port
 
-    # Which drone to control (matches Vehicles in settings.json)
+    # Scene config file (JSONC) that Project AirSim loads
+    # Place this file in your Unreal project's Config folder
+    scene_config: str = "scene_basic_drone.jsonc"
+
+    # Which drone to control (must match robot name in scene config)
     vehicle_name: str = "Drone1"
 
-    # Physics
-    default_speed_ms: float = 5.0       # m/s for movements
-    default_altitude_m: float = -5.0    # NED: negative = up
-    takeoff_altitude_m: float = -3.0    # NED hover height after takeoff
+    # How long to wait after scene loads before sending commands (seconds)
+    scene_load_delay_s: float = 2.0
 
-    # Safety limits (enforced by constraints layer in Phase 3)
-    max_altitude_m: float = 50.0        # AGL metres
+    # Physics — all values in SI units (metres, radians)
+    default_speed_ms: float = 5.0
+    takeoff_altitude_m: float = 3.0   # positive = up (converted to NED internally)
+
+    # Safety limits enforced by the GSCE constraints layer
+    max_altitude_m: float = 50.0
     max_speed_ms: float = 15.0
     min_battery_pct: float = 20.0
 

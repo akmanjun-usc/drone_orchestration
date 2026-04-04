@@ -1,4 +1,4 @@
-"""drone — AirSim bridge and primitives."""
+"""drone — Project AirSim bridge and primitives."""
 
 from drone.bridge import DroneClient, ConnectionError
 from drone.config import SIM_CONFIG, SimConfig
