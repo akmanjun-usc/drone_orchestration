@@ -1,0 +1,12 @@
+# AirSim Python SDK
+# Install from Microsoft's repo if pip version is broken:
+#   pip install msgpack-rpc-python
+#   pip install airsim
+airsim>=1.8.1
+
+# LLM providers (Phase 4)
+anthropic>=0.30.0
+openai>=1.40.0
+
+# Utilities
+python-dotenv>=1.0.0
