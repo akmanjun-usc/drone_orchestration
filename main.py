@@ -99,6 +99,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # -- prompt --
     sub.add_parser("prompt", help="Print the assembled GSCE system prompt and exit")
+    _add_agent_subparser(sub)
 
     return parser
 
@@ -272,9 +273,84 @@ def main() -> None:
         "repl": cmd_repl,
         "eval": cmd_eval,
         "prompt": cmd_prompt,
+        "agent": cmd_agent,
     }
     dispatch[args.command](args)
 
 
 if __name__ == "__main__":
     main()
+
+
+def _add_agent_subparser(sub) -> None:
+    """Register the 'agent' subcommand. Called from _build_parser."""
+    agent_p = sub.add_parser(
+        "agent",
+        help="Run an agentic drone that perceives, decides, and acts autonomously",
+    )
+    agent_p.add_argument("goal", help="Goal description in plain English")
+    agent_p.add_argument(
+        "--steps", type=int, default=20,
+        help="Max perceive-decide-act steps before giving up (default: 20)",
+    )
+    agent_p.add_argument(
+        "--target-x", type=float, default=None,
+        help="Target X coordinate for nav goals (enables auto-completion check)",
+    )
+    agent_p.add_argument(
+        "--target-y", type=float, default=None,
+        help="Target Y coordinate for nav goals",
+    )
+    agent_p.add_argument(
+        "--target-alt", type=float, default=None,
+        help="Target altitude AGL for nav goals",
+    )
+    agent_p.add_argument(
+        "--photos", type=int, default=0,
+        help="Number of photos required to complete photo/survey goals (default: 0)",
+    )
+    agent_p.add_argument(
+        "--quiet", action="store_true",
+        help="Suppress per-step console output",
+    )
+
+
+def cmd_agent(args) -> None:
+    from drone.bridge import DroneClient
+    from llm.factory import get_provider
+    from agent.goal import Goal
+    from agent.agent import DroneAgent
+
+    provider, model = get_provider(provider_name=args.provider, model=args.model)
+    logger.info("Provider: %s  |  Model: %s", provider.provider_name, model)
+
+    goal = Goal(
+        description=args.goal,
+        completion_hint=f"The agent will self-report GOAL_COMPLETE when done.",
+        max_steps=args.steps,
+        target_x=args.target_x,
+        target_y=args.target_y,
+        target_altitude=args.target_alt,
+        photos_required=args.photos,
+    )
+
+    with DroneClient() as client:
+        agent = DroneAgent(
+            provider=provider,
+            model=model,
+            client=client,
+            goal=goal,
+            verbose=not args.quiet,
+        )
+        result = agent.run()
+
+    print("\n" + "=" * 60)
+    print(f"Goal     : {result.goal.description}")
+    print(f"Status   : {'SUCCESS' if result.success else 'FAILED'}")
+    print(f"Steps    : {result.steps_taken}/{result.goal.max_steps}")
+    print(f"Photos   : {result.goal.photos_taken}/{result.goal.photos_required}")
+    if result.abort_reason:
+        print(f"Abort    : {result.abort_reason}")
+    print("=" * 60)
+
+    sys.exit(0 if result.success else 1)
