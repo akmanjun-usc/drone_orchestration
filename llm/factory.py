@@ -18,7 +18,7 @@ def get_provider(
     Build and return (provider, model_name).
 
     Args:
-        provider_name: "anthropic" | "openai". Falls back to LLM_PROVIDER env var.
+        provider_name: "anthropic" | "openai" | "groq". Falls back to LLM_PROVIDER env var.
         model: Model string. Falls back to LLM_MODEL env var, then provider default.
         **kwargs: Extra args forwarded to the provider constructor (e.g. base_url).
 
@@ -39,6 +39,12 @@ def get_provider(
         provider = OpenAIProvider(**kwargs)
         if not resolved_model:
             resolved_model = OpenAIProvider.DEFAULT_MODEL
+
+    elif name == "groq":
+        from llm.groq_provider import GroqProvider
+        provider = GroqProvider(**kwargs)
+        if not resolved_model:
+            resolved_model = GroqProvider.DEFAULT_MODEL
 
     else:
         raise ValueError(
