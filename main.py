@@ -100,6 +100,7 @@ def _build_parser() -> argparse.ArgumentParser:
     # -- prompt --
     sub.add_parser("prompt", help="Print the assembled GSCE system prompt and exit")
     _add_agent_subparser(sub)
+    _add_agent_repl_subparser(sub)
 
     return parser
 
@@ -274,6 +275,7 @@ def main() -> None:
         "eval": cmd_eval,
         "prompt": cmd_prompt,
         "agent": cmd_agent,
+        "agent-repl": cmd_agent_repl,
     }
     dispatch[args.command](args)
 
@@ -354,3 +356,217 @@ def cmd_agent(args) -> None:
     print("=" * 60)
 
     sys.exit(0 if result.success else 1)
+
+
+def _add_agent_repl_subparser(sub) -> None:
+    agent_repl_p = sub.add_parser(
+        "agent-repl",
+        help="Interactive agentic REPL — type goals, watch the drone act step by step",
+    )
+    agent_repl_p.add_argument(
+        "--steps", type=int, default=20,
+        help="Max steps per goal before pausing for input (default: 20)",
+    )
+    agent_repl_p.add_argument(
+        "--pause-every", type=int, default=3,
+        help="Pause for input every N steps (default: 3, 0 = never pause mid-goal)",
+    )
+
+
+def cmd_agent_repl(args) -> None:
+    from drone.bridge import DroneClient
+    from llm.factory import get_provider
+    from agent.goal import Goal
+    from agent.agent import DroneAgent
+
+    provider, model = get_provider(provider_name=args.provider, model=args.model)
+    logger.info("Provider: %s  |  Model: %s", provider.provider_name, model)
+
+    print(f"\nGSCE Agent REPL  [{provider.provider_name} / {model}]")
+    print("Type a goal in plain English. The drone will act step by step.")
+    print("Commands during or between goals:")
+    print("  continue       run the next step")
+    print("  run            run until goal done or step limit")
+    print("  stop           stop current goal, enter new one")
+    print("  redirect <txt> change the goal mid-flight")
+    print("  status         show current drone state")
+    print("  drones         list active drones")
+    print("  select <name>  switch active drone")
+    print("  spawn          activate next drone")
+    print("  quit           exit\n")
+
+    with DroneClient() as client:
+        agent: DroneAgent | None = None
+        pause_every = args.pause_every
+
+        while True:
+            # ---- prompt changes based on whether an agent is running ----
+            drone_name = client.active_drone_name
+            if agent is not None and not agent.goal.is_over():
+                prompt = f"[{drone_name} | step {agent.goal.steps_taken}/{agent.goal.max_steps}]> "
+            else:
+                prompt = f"[{drone_name} | goal]> "
+
+            try:
+                user_input = input(prompt).strip()
+            except (EOFError, KeyboardInterrupt):
+                print("\nExiting.")
+                break
+
+            if not user_input:
+                continue
+
+            parts = user_input.split(maxsplit=1)
+            cmd = parts[0].lower()
+            rest = parts[1] if len(parts) > 1 else ""
+
+            # ---- built-in commands ----
+
+            if cmd in {"quit", "exit", "q"}:
+                break
+
+            if cmd == "drones":
+                names = client.get_active_drone_names()
+                current = client.active_drone_name
+                for n in names:
+                    marker = " <-- active" if n == current else ""
+                    print(f"  {n}{marker}")
+                print()
+                continue
+
+            if cmd == "select" and rest:
+                try:
+                    client.set_active_drone(rest.strip())
+                    print(f"Now controlling {rest.strip()}\n")
+                    if agent:
+                        agent._drone_name = client.active_drone_name
+                        agent._skill_namespace["client"] = client
+                except ValueError as e:
+                    print(f"Error: {e}\n")
+                continue
+
+            if cmd == "spawn":
+                try:
+                    name = client.spawn_drone(rest.strip() if rest else None)
+                    print(f"Spawned {name}  ({len(client.get_active_drone_names())}/{client.config.max_drones} active)\n")
+                except RuntimeError as e:
+                    print(f"Error: {e}\n")
+                continue
+
+            if cmd == "status":
+                from agent.perception import observe
+                try:
+                    _, state_text = observe(client)
+                    print(state_text + "\n")
+                except Exception as e:
+                    print(f"Could not read state: {e}\n")
+                continue
+
+            if cmd == "stop":
+                if agent:
+                    agent.goal.abort_reason = "User stopped the goal."
+                    print("Goal stopped.\n")
+                    agent = None
+                else:
+                    print("No active goal.\n")
+                continue
+
+            if cmd == "redirect" and rest:
+                if agent:
+                    agent.redirect(rest)
+                    print(f"Goal changed to: {rest}\n")
+                else:
+                    print("No active agent — type a goal first.\n")
+                continue
+
+            if cmd == "continue":
+                if agent is None or agent.goal.is_over():
+                    print("No active goal. Type a new goal first.\n")
+                    continue
+                log = agent.step_once()
+                _print_step(log)
+                if log["done"]:
+                    _print_goal_result(agent)
+                    agent = None
+                continue
+
+            if cmd == "run":
+                if agent is None or agent.goal.is_over():
+                    print("No active goal. Type a new goal first.\n")
+                    continue
+                # Run to completion without pausing
+                while not agent.goal.is_over():
+                    log = agent.step_once()
+                    _print_step(log)
+                _print_goal_result(agent)
+                agent = None
+                continue
+
+            # ---- treat anything else as a new goal ----
+            goal_text = user_input
+            goal = Goal(
+                description=goal_text,
+                completion_hint="The agent will declare GOAL_COMPLETE when done.",
+                max_steps=args.steps,
+            )
+            agent = DroneAgent(
+                provider=provider,
+                model=model,
+                client=client,
+                goal=goal,
+                verbose=False,  # we handle printing ourselves below
+            )
+            print(f"\nGoal set: {goal_text}")
+            print(f"Running up to {args.steps} steps, pausing every "
+                  f"{pause_every if pause_every > 0 else args.steps} steps.\n")
+
+            # Run the first batch of steps automatically
+            steps_since_pause = 0
+            while not agent.goal.is_over():
+                log = agent.step_once()
+                _print_step(log)
+                steps_since_pause += 1
+
+                if log["done"]:
+                    _print_goal_result(agent)
+                    agent = None
+                    break
+
+                if pause_every > 0 and steps_since_pause >= pause_every:
+                    print(f"[Paused after {agent.goal.steps_taken} steps]")
+                    print("  continue / run / stop / redirect <new goal> / or type a new goal\n")
+                    steps_since_pause = 0
+                    break
+
+
+def _print_step(log: dict) -> None:
+    """Print one agent step in a readable format."""
+    step = log.get("step", "?")
+    action = log.get("action", "(none)")
+    outcome = log.get("outcome", "?")
+    state = log.get("state", {})
+
+    pos = ""
+    if state:
+        pos = (f"  x={state.get('x', 0):.1f} y={state.get('y', 0):.1f} "
+               f"alt={state.get('z_agl', 0):.1f}m")
+
+    outcome_icon = "OK" if outcome == "success" else (
+        "DONE" if "complete" in outcome else "FAIL"
+    )
+    print(f"  Step {step:>2} [{outcome_icon}]  {action}")
+    if pos:
+        print(f"          {pos}")
+
+
+def _print_goal_result(agent) -> None:
+    """Print the final outcome of a completed goal."""
+    goal = agent.goal
+    print()
+    if goal.completed:
+        print(f"GOAL ACHIEVED in {goal.steps_taken} steps.")
+    elif goal.abort_reason:
+        print(f"ABORTED: {goal.abort_reason}")
+    else:
+        print(f"Step limit reached ({goal.steps_taken}/{goal.max_steps} steps).")
+    print()

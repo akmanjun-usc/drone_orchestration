@@ -257,3 +257,53 @@ class DroneAgent:
             tb = traceback.format_exc()
             logger.error("Action failed: %s\n%s", exc, tb)
             return f"error: {exc}"
+
+    def step_once(self) -> dict:
+        """
+        Run exactly one perceive-decide-act cycle and return the log entry.
+
+        Used by the interactive agent REPL so the outer loop can pause
+        between steps and accept user input.
+
+        Returns a dict with keys: step, action, outcome, state, done.
+        The 'done' key is True when the goal is over (complete, aborted,
+        or step limit reached).
+        """
+        if self.goal.is_over():
+            return {"step": self.goal.steps_taken, "action": None,
+                    "outcome": "already_done", "state": {}, "done": True}
+
+        self.goal.steps_taken += 1
+        log = self._step(self.goal.steps_taken)
+
+        # Auto nav completion check
+        if not self.goal.completed and log.get("outcome") == "success":
+            state = log.get("state", {})
+            if state and self.goal.check_nav_completion(state):
+                self.goal.completed = True
+
+        # Auto photo completion check
+        if not self.goal.completed and self.goal.check_photo_completion():
+            self.goal.completed = True
+
+        log["done"] = self.goal.is_over()
+        return log
+
+    def redirect(self, new_goal_description: str) -> None:
+        """
+        Replace the current goal with a new one mid-session.
+
+        Resets step count and clears memory so the agent starts fresh
+        toward the new goal. The drone stays wherever it is.
+
+        Args:
+            new_goal_description: New goal in plain English.
+        """
+        old = self.goal.description
+        self.goal.description = new_goal_description
+        self.goal.completed = False
+        self.goal.abort_reason = None
+        self.goal.steps_taken = 0
+        self.goal.photos_taken = 0
+        self._memory.clear()
+        logger.info("Goal redirected: %r -> %r", old, new_goal_description)
