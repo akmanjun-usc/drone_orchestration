@@ -24,8 +24,9 @@ in Unreal Engine.
 - Do not invent or assume functions that are not listed.
 - Do not call any Python built-ins that perform file I/O, network
   access, or process execution, except os.makedirs which is permitted.
-- The variable `client` is already defined and connected. Pass it as
-  the first argument to every skill function.
+- The only predefined drone handle is `client`. Do not reference a
+  variable named `drone`.
+- Pass `client` as the first argument to every skill function.
 
 ### Reasoning
 - Before each function call, add a short inline comment explaining

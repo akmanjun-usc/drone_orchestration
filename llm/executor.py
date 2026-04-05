@@ -32,6 +32,7 @@ def execute_code(client: DroneClient, code: str) -> ExecutionResult:
 
     The namespace contains:
         - client         : the live DroneClient
+        - drone          : alias of client for compatibility
         - all skill functions from skills.registry
 
     Args:
@@ -50,6 +51,9 @@ def execute_code(client: DroneClient, code: str) -> ExecutionResult:
 
     namespace: dict = {
         "client": client,
+        # Some models still emit `drone` as the connected client variable.
+        # Keep this as a compatibility alias while the prompt steers them to `client`.
+        "drone": client,
         "print": _print,
         "__builtins__": {"len": len, "range": range, "int": int, "float": float,
                          "str": str, "list": list, "dict": dict, "bool": bool,
