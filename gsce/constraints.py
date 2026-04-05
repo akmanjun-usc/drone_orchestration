@@ -34,6 +34,14 @@ _CONSTRAINTS: list[str] = [
 
     "If any skill function raises an exception, do not retry silently. "
     "Let the exception propagate so the orchestrator can log it.",
+
+    f"The simulation supports a maximum of {SIM_CONFIG.max_drones} drones. "
+    f"Before spawning a new drone, check list_drones(client) to see how many "
+    f"are already active. Never call spawn_drone() if {SIM_CONFIG.max_drones} "
+    f"drones are already active.",
+
+    "After spawning a new drone, always call select_drone(client, name) "
+    "followed by takeoff(client) before issuing movement commands to it.",
 ]
 
 

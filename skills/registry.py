@@ -10,10 +10,11 @@ import inspect
 import textwrap
 from types import ModuleType
 
-from skills import navigation, perception, mission
+from skills import navigation, perception, mission, fleet
 
 # Ordered list of skill modules — order determines prompt order
 SKILL_MODULES: list[tuple[str, ModuleType]] = [
+    ("Fleet Management", fleet),
     ("Navigation", navigation),
     ("Perception", perception),
     ("Mission", mission),

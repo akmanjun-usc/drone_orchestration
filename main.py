@@ -157,14 +157,19 @@ def cmd_repl(args) -> None:
     provider, model = get_provider(provider_name=args.provider, model=args.model)
     logger.info("Provider: %s  |  Model: %s", provider.provider_name, model)
     print(f"\nGSCE Drone REPL  [{provider.provider_name} / {model}]")
-    print("Type a task in plain English, or 'quit' to exit.\n")
+    print("Type a task in plain English, or use a command:")
+    print("  spawn [name]  — activate a new drone (up to 10)")
+    print("  drones        — list active drones")
+    print("  select <name> — switch which drone receives commands")
+    print("  quit          — exit\n")
 
     with DroneClient() as client:
         orch = Orchestrator(provider=provider, model=model, drone_client=client)
 
         while True:
             try:
-                task = input("task> ").strip()
+                active = client.active_drone_name
+                task = input(f"[{active}] task> ").strip()
             except (EOFError, KeyboardInterrupt):
                 print("\nExiting.")
                 break
@@ -174,6 +179,42 @@ def cmd_repl(args) -> None:
             if task.lower() in {"quit", "exit", "q"}:
                 break
 
+            # ---- built-in REPL commands for multi-drone management -----
+            parts = task.split(maxsplit=1)
+            cmd_word = parts[0].lower()
+
+            if cmd_word == "spawn":
+                drone_name = parts[1].strip() if len(parts) > 1 else None
+                try:
+                    activated = client.spawn_drone(drone_name)
+                    total = len(client.get_active_drone_names())
+                    max_d = client.config.max_drones
+                    print(f"✓ Spawned {activated}  ({total}/{max_d} active)\n")
+                except RuntimeError as e:
+                    print(f"✗ {e}\n")
+                continue
+
+            if cmd_word == "drones":
+                names = client.get_active_drone_names()
+                current = client.active_drone_name
+                max_d = client.config.max_drones
+                print(f"Active drones ({len(names)}/{max_d}):")
+                for n in names:
+                    marker = " ◄" if n == current else ""
+                    print(f"  • {n}{marker}")
+                print()
+                continue
+
+            if cmd_word == "select" and len(parts) > 1:
+                name = parts[1].strip()
+                try:
+                    client.set_active_drone(name)
+                    print(f"✓ Now controlling {name}\n")
+                except ValueError as e:
+                    print(f"✗ {e}\n")
+                continue
+
+            # ---- LLM task execution ------------------------------------
             result = orch.run_task(task)
             status = "PASS" if result.success else "FAIL"
             print(f"[{status}] {result.attempts} attempt(s) | {result.output_tokens} tokens out\n")
