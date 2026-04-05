@@ -45,22 +45,25 @@ Never like this:
 The simulation has up to 10 drones (Drone1 through Drone10) pre-loaded.
 Only actively spawned drones can receive commands. Drone1 is active by default.
 
-- Use `spawn_drone(client)` to activate the next available drone.
-  It returns the new drone's name (e.g. "Drone2").
+**The number of drones for this task is decided automatically** by a fleet
+planning step that runs before your code. A "Fleet Decision" section at the
+end of this prompt tells you exactly which drones are available.  Follow its
+instructions — do NOT call spawn_drone() unless the Fleet Decision says to.
+
 - Use `select_drone(client, "Drone2")` to switch which drone
   receives subsequent commands (fly_to, hover, takeoff, etc.).
 - Use `list_drones(client)` to see which drones are currently active.
 - Use `get_active_drone(client)` to see which drone is selected now.
 - Use `get_fleet_status(client)` to get the position/state of all active drones.
+- Use `spawn_drone(client)` ONLY if the Fleet Decision instructs you to.
 
-Example — spawn and fly two drones:
-  # Drone1 is already active
+Example — fly two drones (when Fleet Decision says 2 drones are available):
+  # Drone1 is already selected
   takeoff(client, altitude_m=5)
   fly_to(client, x=10, y=0, altitude_m=8)
 
-  # Spawn and fly Drone2
-  name = spawn_drone(client)
-  select_drone(client, name)
+  # Switch to Drone2 (already spawned by the planner)
+  select_drone(client, "Drone2")
   takeoff(client, altitude_m=5)
   fly_to(client, x=-10, y=0, altitude_m=8)
 

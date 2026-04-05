@@ -5,6 +5,13 @@ The main loop: takes a natural language task, calls the LLM,
 extracts the generated code, executes it on the drone, and
 logs the result. Supports multi-turn conversations so the
 LLM can see previous attempts.
+
+Fleet planning:
+  Before generating code, a lightweight planning LLM call
+  analyzes the task to decide how many drones are needed.
+  The orchestrator spawns them automatically, then injects
+  a "Fleet Decision" section into the code-generation prompt
+  so the LLM knows exactly which drones are available.
 """
 
 import logging
@@ -15,6 +22,7 @@ from gsce.prompt_builder import build_system_prompt
 from llm.provider import LLMProvider, CompletionRequest, Message
 from llm.code_extractor import extract_code
 from llm.executor import execute_code, ExecutionResult
+from llm.fleet_planner import FleetPlan, plan_fleet, build_fleet_context
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +37,7 @@ class TaskResult:
     output_tokens: int = 0
     model: str = ""
     attempts: int = 1
+    fleet_plan: FleetPlan | None = None
 
 
 class Orchestrator:
@@ -52,12 +61,21 @@ class Orchestrator:
         self.model = model
         self.drone_client = drone_client
         self.max_retries = max_retries
-        self.system_prompt = system_prompt or build_system_prompt()
+        self._base_system_prompt = system_prompt or build_system_prompt()
         self._history: list[Message] = []
 
     def run_task(self, task: str, use_history: bool = False) -> TaskResult:
         """
         Run a single natural language task.
+
+        Steps:
+          1. Fleet planning — ask the LLM how many drones this task needs,
+             then spawn them automatically.
+          2. Code generation — call the LLM with the task + fleet context
+             to generate executable Python code.
+          3. Execution — run the generated code against the live drone(s).
+          4. Self-correction — if execution fails, feed the error back
+             to the LLM and retry (up to max_retries times).
 
         Args:
             task: The task description in plain English.
@@ -65,10 +83,32 @@ class Orchestrator:
                          learn from earlier attempts in this session.
 
         Returns:
-            TaskResult with success flag, code, and token usage.
+            TaskResult with success flag, code, fleet plan, and token usage.
         """
         logger.info("Task: %s", task)
 
+        # --- Step 1: Fleet planning --------------------------------------
+        fleet = plan_fleet(
+            provider=self.provider,
+            model=self.model,
+            task=task,
+            client=self.drone_client,
+        )
+        logger.info(
+            "Fleet decision: %d drone(s) — %s",
+            fleet.drone_count,
+            fleet.reasoning,
+        )
+
+        # Build the augmented system prompt with fleet context
+        fleet_section = build_fleet_context(fleet)
+        system_prompt = (
+            self._base_system_prompt
+            + "\n\n---\n\n"
+            + fleet_section
+        )
+
+        # --- Step 2+3+4: Code generation loop -----------------------------
         messages = list(self._history) if use_history else []
         messages.append(Message(role="user", content=task))
 
@@ -78,7 +118,7 @@ class Orchestrator:
             logger.info("Attempt %d/%d", attempt, self.max_retries + 1)
 
             request = CompletionRequest(
-                system_prompt=self.system_prompt,
+                system_prompt=system_prompt,
                 messages=messages,
                 model=self.model,
             )
@@ -106,6 +146,7 @@ class Orchestrator:
                     output_tokens=response.output_tokens,
                     model=response.model,
                     attempts=attempt,
+                    fleet_plan=fleet,
                 )
                 break
 
@@ -120,6 +161,7 @@ class Orchestrator:
                 output_tokens=response.output_tokens,
                 model=response.model,
                 attempts=attempt,
+                fleet_plan=fleet,
             )
 
             if exec_result.success:

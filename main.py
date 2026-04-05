@@ -136,6 +136,8 @@ def cmd_task(args) -> None:
     print("\n" + "="*60)
     print(f"Task     : {result.task}")
     print(f"Status   : {'PASS' if result.success else 'FAIL'}")
+    if result.fleet_plan:
+        print(f"Fleet    : {result.fleet_plan.drone_count} drone(s) — {result.fleet_plan.reasoning}")
     print(f"Attempts : {result.attempts}")
     print(f"Tokens   : {result.input_tokens} in / {result.output_tokens} out")
     print(f"Model    : {result.model}")
@@ -217,7 +219,13 @@ def cmd_repl(args) -> None:
             # ---- LLM task execution ------------------------------------
             result = orch.run_task(task)
             status = "PASS" if result.success else "FAIL"
-            print(f"[{status}] {result.attempts} attempt(s) | {result.output_tokens} tokens out\n")
+            fleet_info = ""
+            if result.fleet_plan:
+                fleet_info = f" | fleet={result.fleet_plan.drone_count}"
+            print(f"[{status}] {result.attempts} attempt(s){fleet_info} | {result.output_tokens} tokens out")
+            if result.fleet_plan:
+                print(f"  Fleet decision: {result.fleet_plan.reasoning}")
+            print()
 
 
 def cmd_eval(args) -> None:
