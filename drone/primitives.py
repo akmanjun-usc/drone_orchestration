@@ -1,20 +1,24 @@
 """
 Drone primitives for Project AirSim.
 
-Same function names and signatures as the original AirSim primitives.py.
-Only the internals change to use the Project AirSim Drone API.
+Verified against the official example scripts from example_user_scripts.zip.
 
-Key differences from original AirSim:
-  - All movement calls are async. client.run() bridges to synchronous.
-  - Units are SI: metres and RADIANS (not degrees for angles).
-  - NED convention still applies: negative Z = up.
-  - State data comes from subscribed topics, not a direct get call.
-  - Camera images use get_images() with a different request structure.
+Key confirmed facts:
+  - drone.get_ground_truth_kinematics() returns a dict:
+      ["pose"]["position"]    -> {"x", "y", "z"}  (NED metres, z negative = up)
+      ["pose"]["orientation"] -> {"w", "x", "y", "z"} quaternion
+      ["twist"]["linear"]     -> {"x", "y", "z"}  (NED m/s)
+  - drone.go_home_async(velocity) exists (confirmed in move_apis.py)
+  - Camera data comes only via subscriptions, not pull calls
+  - All async calls need the double-await via client.run_async()
+  - from projectairsim.utils import quaternion_to_rpy is available
 """
 
 import math
 import time
 import logging
+
+from projectairsim.utils import quaternion_to_rpy
 
 from drone.bridge import DroneClient
 from drone.config import SIM_CONFIG
@@ -32,33 +36,33 @@ def takeoff(client: DroneClient, altitude_m: float | None = None) -> None:
 
     Args:
         client: Connected DroneClient.
-        altitude_m: Target hover altitude in metres AGL (positive number).
-                    Defaults to config.takeoff_altitude_m.
+        altitude_m: Target altitude in metres AGL (positive). Defaults to config value.
     """
     alt = altitude_m if altitude_m is not None else SIM_CONFIG.takeoff_altitude_m
     logger.info("Taking off to %.1f m AGL", alt)
 
-    # takeoff_async climbs to a default safe height
-    client.run(client.drone.takeoff_async())
+    # takeoff_async lifts to a safe default height (~3 m)
+    client.run_async(lambda: client.drone.takeoff_async())
 
-    # Then move to the requested altitude using velocity control
-    # v_down is negative to climb in NED
-    ned_climb_speed = -SIM_CONFIG.default_speed_ms
+    # Climb to requested altitude if higher than default takeoff height
     current_alt = get_altitude(client)
-    climb_duration = abs(alt - current_alt) / SIM_CONFIG.default_speed_ms + 1.0
+    if alt - current_alt > 0.5:
+        climb_duration = (alt - current_alt) / SIM_CONFIG.default_speed_ms + 1.0
+        # Capture to avoid late-binding in lambda
+        _dur = climb_duration
+        _spd = SIM_CONFIG.default_speed_ms
+        client.run_async(
+            lambda: client.drone.move_by_velocity_async(
+                v_north=0.0, v_east=0.0, v_down=-_spd, duration=_dur
+            )
+        )
 
-    client.run(
-        client.drone.move_by_velocity_async(
-            v_north=0.0,
-            v_east=0.0,
-            v_down=ned_climb_speed,
-            duration=climb_duration,
+    # Zero velocity to stabilise
+    client.run_async(
+        lambda: client.drone.move_by_velocity_async(
+            v_north=0.0, v_east=0.0, v_down=0.0, duration=1.0
         )
     )
-    # Hover to stabilise
-    client.run(client.drone.move_by_velocity_async(
-        v_north=0.0, v_east=0.0, v_down=0.0, duration=1.0
-    ))
     logger.info("Hover reached at %.1f m AGL", alt)
 
 
@@ -70,7 +74,7 @@ def land(client: DroneClient) -> None:
         client: Connected DroneClient.
     """
     logger.info("Landing...")
-    client.run(client.drone.land_async())
+    client.run_async(lambda: client.drone.land_async())
     logger.info("Landed.")
 
 
@@ -83,13 +87,10 @@ def hover(client: DroneClient, duration_s: float = 2.0) -> None:
         duration_s: How long to hover in seconds.
     """
     logger.info("Hovering for %.1f s", duration_s)
-    # Zero velocity for the requested duration holds position
-    client.run(
-        client.drone.move_by_velocity_async(
-            v_north=0.0,
-            v_east=0.0,
-            v_down=0.0,
-            duration=duration_s,
+    _dur = duration_s
+    client.run_async(
+        lambda: client.drone.move_by_velocity_async(
+            v_north=0.0, v_east=0.0, v_down=0.0, duration=_dur
         )
     )
 
@@ -113,19 +114,15 @@ def move_to_position(
     """
     speed = speed_ms or SIM_CONFIG.default_speed_ms
     ned_z = -z_agl  # NED: negative Z is up
-
     logger.info(
         "move_to_position  x=%.1f  y=%.1f  alt=%.1f m  speed=%.1f m/s",
         x, y, z_agl, speed,
     )
-
-    # Project AirSim: move_to_position_async takes NED x, y, z and speed
-    client.run(
-        client.drone.move_to_position_async(
-            north=x,
-            east=y,
-            down=ned_z,
-            velocity=speed,
+    # Capture all variables before the lambda to avoid late binding
+    _x, _y, _z, _s = x, y, ned_z, speed
+    client.run_async(
+        lambda: client.drone.move_to_position_async(
+            north=_x, east=_y, down=_z, velocity=_s
         )
     )
 
@@ -144,19 +141,17 @@ def move_by_velocity(
         client: Connected DroneClient.
         vx: North velocity in m/s.
         vy: East velocity in m/s.
-        vz: Vertical velocity in m/s (positive = up; converted to NED down internally).
-        duration_s: How long to apply the velocity.
+        vz: Vertical velocity in m/s (positive = up, converted to NED internally).
+        duration_s: Duration in seconds.
     """
     logger.info(
         "move_by_velocity  vx=%.1f  vy=%.1f  vz=%.1f  duration=%.1f s",
         vx, vy, vz, duration_s,
     )
-    client.run(
-        client.drone.move_by_velocity_async(
-            v_north=vx,
-            v_east=vy,
-            v_down=-vz,   # convert: positive up -> negative NED down
-            duration=duration_s,
+    _vn, _ve, _vd, _dur = vx, vy, -vz, duration_s
+    client.run_async(
+        lambda: client.drone.move_by_velocity_async(
+            v_north=_vn, v_east=_ve, v_down=_vd, duration=_dur
         )
     )
 
@@ -168,30 +163,27 @@ def rotate_to_yaw(client: DroneClient, yaw_deg: float, margin_deg: float = 5.0) 
     Args:
         client: Connected DroneClient.
         yaw_deg: Target yaw in degrees (0 = North, 90 = East).
-        margin_deg: Acceptable yaw error in degrees (unused in Project AirSim,
-                    kept for API compatibility).
+        margin_deg: Kept for API compatibility with original AirSim version.
     """
     yaw_rad = math.radians(yaw_deg)
-    logger.info("rotate_to_yaw  yaw=%.1f°  (%.4f rad)", yaw_deg, yaw_rad)
-
-    # Project AirSim uses rotate_to_yaw_async with radians
-    client.run(
-        client.drone.rotate_to_yaw_async(yaw=yaw_rad)
-    )
+    logger.info("rotate_to_yaw  %.1f deg  (%.4f rad)", yaw_deg, yaw_rad)
+    _yaw = yaw_rad
+    client.run_async(lambda: client.drone.rotate_to_yaw_async(yaw=_yaw))
 
 
 def return_to_home(client: DroneClient) -> None:
     """
-    Fly back to the spawn/home position and land.
+    Fly back to the home/spawn position and land.
+
+    Uses go_home_async which is confirmed in move_apis.py.
 
     Args:
         client: Connected DroneClient.
     """
-    logger.info("Returning to home position...")
-    # Fly to origin (0, 0) then land
-    current_alt = get_altitude(client)
-    move_to_position(client, x=0.0, y=0.0, z_agl=max(current_alt, 5.0))
-    land(client)
+    logger.info("Returning home...")
+    _spd = SIM_CONFIG.default_speed_ms
+    client.run_async(lambda: client.drone.go_home_async(velocity=_spd))
+    client.run_async(lambda: client.drone.land_async())
     logger.info("Home reached.")
 
 
@@ -203,36 +195,39 @@ def get_state(client: DroneClient) -> dict:
     """
     Return current drone state as a plain dict.
 
-    Returns:
-        Dict with keys:
-            x, y, z_agl   -- position in metres (z_agl positive = up)
-            vx, vy, vz     -- velocity in m/s (vz positive = up)
-            roll, pitch, yaw -- orientation in DEGREES
-            is_landed      -- bool
-    """
-    state = client.drone.get_ground_truth_kinematics()
-    pos = state.position        # NED metres
-    vel = state.linear_velocity # NED m/s
-    ori = state.orientation     # quaternion
+    Calls drone.get_ground_truth_kinematics() which is a synchronous
+    pull call confirmed in wind.py, px4_mission.py, and others.
 
-    # Convert quaternion to Euler angles (radians) then to degrees
-    roll_rad, pitch_rad, yaw_rad = _quat_to_euler(
-        ori.w_val, ori.x_val, ori.y_val, ori.z_val
+    Returns a dict with keys:
+        x, y, z_agl   position in metres. z_agl positive = up.
+        vx, vy, vz    velocity in m/s. vz positive = up.
+        roll, pitch, yaw  orientation in degrees.
+        is_landed     True if z_agl is below 0.3 m.
+    """
+    kin = client.drone.get_ground_truth_kinematics()
+
+    pos = kin["pose"]["position"]       # {"x", "y", "z"} NED metres
+    ori = kin["pose"]["orientation"]    # {"w", "x", "y", "z"} quaternion
+    vel = kin["twist"]["linear"]        # {"x", "y", "z"} NED m/s
+
+    # quaternion_to_rpy is confirmed importable from projectairsim.utils
+    roll_rad, pitch_rad, yaw_rad = quaternion_to_rpy(
+        ori["w"], ori["x"], ori["y"], ori["z"]
     )
 
-    landed = client.drone.get_landed_state()
+    z_agl = -pos["z"]  # NED: negative Z is up, flip to positive AGL
 
     return {
-        "x": pos.x_val,
-        "y": pos.y_val,
-        "z_agl": -pos.z_val,              # NED Z to AGL
-        "vx": vel.x_val,
-        "vy": vel.y_val,
-        "vz": -vel.z_val,                 # NED Z vel to up-positive
+        "x": pos["x"],
+        "y": pos["y"],
+        "z_agl": z_agl,
+        "vx": vel["x"],
+        "vy": vel["y"],
+        "vz": -vel["z"],                 # flip NED Z to up-positive
         "roll": math.degrees(roll_rad),
         "pitch": math.degrees(pitch_rad),
         "yaw": math.degrees(yaw_rad),
-        "is_landed": landed,
+        "is_landed": z_agl < 0.3,       # no pull API for landed state, infer from altitude
     }
 
 
@@ -242,113 +237,131 @@ def get_altitude(client: DroneClient) -> float:
 
     Args:
         client: Connected DroneClient.
-
-    Returns:
-        Altitude as a positive float.
     """
     return get_state(client)["z_agl"]
 
 
 def get_gps(client: DroneClient) -> dict:
     """
-    Return GPS position.
+    Return GPS position via subscription callback.
+
+    Note: GPS sensor must be enabled in your robot config JSONC
+    ("enabled": true) for this to return data.
 
     Args:
         client: Connected DroneClient.
 
     Returns:
         Dict with keys: latitude, longitude, altitude_msl.
+        Returns zeros if no GPS data has arrived yet.
     """
-    gps = client.drone.get_gps_data()
+    gps_data = client.get_latest_image("GPS/gps")
+    if gps_data is None:
+        client.subscribe_camera(
+            sensor_name="GPS",
+            image_key="GPS/gps",
+            topic_key="gps",
+        )
+        time.sleep(0.3)
+        gps_data = client.get_latest_image("GPS/gps")
+
+    if gps_data is None:
+        return {"latitude": 0.0, "longitude": 0.0, "altitude_msl": 0.0}
+
     return {
-        "latitude": gps.latitude,
-        "longitude": gps.longitude,
-        "altitude_msl": gps.altitude,
+        "latitude": gps_data.get("latitude", 0.0),
+        "longitude": gps_data.get("longitude", 0.0),
+        "altitude_msl": gps_data.get("altitude", 0.0),
     }
 
 
 # ------------------------------------------------------------------
-# Sensors / perception
+# Camera / perception
 # ------------------------------------------------------------------
 
 def capture_image(
     client: DroneClient,
-    camera_name: str = "front_center",
-    image_type: str = "scene",
+    camera_name: str = "DownCamera",
+    topic_key: str = "scene_camera",
+    save_path: str | None = None,
 ) -> bytes:
     """
-    Capture a PNG image from the specified camera.
+    Return the latest frame from a subscribed camera.
+
+    Camera names and topic keys come from your robot config JSONC.
+    The default robot_quadrotor_fastphysics.jsonc defines:
+        sensors["Chase"]["scene_camera"]
+        sensors["DownCamera"]["scene_camera"]
+        sensors["DownCamera"]["depth_camera"]
+
+    On first call for a new camera, this subscribes automatically
+    and waits 0.5 s for the first frame to arrive.
 
     Args:
         client: Connected DroneClient.
-        camera_name: Camera name as defined in your robot config JSONC.
-                     Default is "front_center". In original AirSim this was "0".
-        image_type: "scene" (RGB), "depth_planar", or "segmentation".
+        camera_name: Sensor ID from your robot config, e.g. "DownCamera".
+        topic_key: Topic key, e.g. "scene_camera" or "depth_camera".
+        save_path: If given, write bytes to this file path.
 
     Returns:
-        Raw PNG bytes.
+        Raw image bytes.
+
+    Raises:
+        RuntimeError if no frame has arrived yet.
     """
-    from projectairsim import ImageType
+    image_key = f"{camera_name}/{topic_key}"
 
-    type_map = {
-        "scene": ImageType.Scene,
-        "depth_planar": ImageType.DepthPlanar,
-        "segmentation": ImageType.Segmentation,
-    }
-    img_type = type_map.get(image_type, ImageType.Scene)
+    if image_key not in client._latest_images:
+        client.subscribe_camera(
+            sensor_name=camera_name,
+            image_key=image_key,
+            topic_key=topic_key,
+        )
+        time.sleep(0.5)
 
-    responses = client.drone.get_images(
-        requests=[{"camera_name": camera_name, "image_type": img_type, "compress": True}]
-    )
+    data = client.get_latest_image(image_key)
+    if data is None:
+        raise RuntimeError(
+            f"No image received from sensors['{camera_name}']['{topic_key}']. "
+            f"Check that this sensor is defined and enabled in your robot config JSONC."
+        )
 
-    if not responses:
-        raise RuntimeError(f"No image returned from camera '{camera_name}'")
+    if save_path:
+        with open(save_path, "wb") as f:
+            f.write(data)
+        logger.info("Image saved to %s", save_path)
 
-    return responses[0].image_data
+    return data
 
 
-def get_lidar(client: DroneClient, lidar_name: str = "lidar") -> list[dict]:
+def get_lidar(client: DroneClient, lidar_name: str = "LidarSensor") -> list[dict]:
     """
-    Return LIDAR point cloud as a list of (x, y, z) dicts.
+    Return a LIDAR point cloud snapshot.
 
     Args:
         client: Connected DroneClient.
-        lidar_name: Sensor name as defined in your robot config JSONC.
-                    In original AirSim this was "LidarSensor1".
+        lidar_name: Sensor ID from your robot config JSONC.
 
     Returns:
-        List of dicts with keys x, y, z in metres (world frame).
+        List of dicts with keys x, y, z in metres.
     """
-    data = client.drone.get_lidar_data(lidar_name=lidar_name)
+    data = client.get_latest_image(f"{lidar_name}/lidar_pc")
+    if data is None:
+        client.subscribe_camera(
+            sensor_name=lidar_name,
+            image_key=f"{lidar_name}/lidar_pc",
+            topic_key="lidar_pc",
+        )
+        time.sleep(0.3)
+        data = client.get_latest_image(f"{lidar_name}/lidar_pc")
+
+    if data is None:
+        return []
+
+    # data is a list of [x, y, z] triples
     points = []
-    cloud = data.point_cloud
-    for i in range(0, len(cloud), 3):
-        points.append({
-            "x": cloud[i],
-            "y": cloud[i + 1],
-            "z": cloud[i + 2],
-        })
+    if isinstance(data, list):
+        for pt in data:
+            if isinstance(pt, (list, tuple)) and len(pt) >= 3:
+                points.append({"x": pt[0], "y": pt[1], "z": pt[2]})
     return points
-
-
-# ------------------------------------------------------------------
-# Internal helpers
-# ------------------------------------------------------------------
-
-def _quat_to_euler(w: float, x: float, y: float, z: float) -> tuple:
-    """Convert a unit quaternion to (roll, pitch, yaw) in radians."""
-    # Roll (x-axis rotation)
-    sinr_cosp = 2.0 * (w * x + y * z)
-    cosr_cosp = 1.0 - 2.0 * (x * x + y * y)
-    roll = math.atan2(sinr_cosp, cosr_cosp)
-
-    # Pitch (y-axis rotation)
-    sinp = 2.0 * (w * y - z * x)
-    pitch = math.copysign(math.pi / 2, sinp) if abs(sinp) >= 1 else math.asin(sinp)
-
-    # Yaw (z-axis rotation)
-    siny_cosp = 2.0 * (w * z + x * y)
-    cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
-    yaw = math.atan2(siny_cosp, cosy_cosp)
-
-    return roll, pitch, yaw
