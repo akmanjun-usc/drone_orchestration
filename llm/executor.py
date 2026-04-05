@@ -1,12 +1,15 @@
 """
 Executor.
 
-Runs LLM-generated code in a controlled namespace that
-contains only the skill functions and the drone client.
-Any exception raised by the code propagates up to the
-orchestrator for logging.
+Runs LLM-generated code in a sandboxed namespace containing only
+the skill functions and the live drone client.
+
+Also validates code before running it to catch common LLM hallucination
+patterns early and return a clear error message instead of a confusing
+AttributeError.
 """
 
+import re
 import logging
 import traceback
 from dataclasses import dataclass, field
@@ -15,6 +18,20 @@ from drone.bridge import DroneClient
 from skills.registry import get_skill_functions
 
 logger = logging.getLogger(__name__)
+
+# Patterns that indicate the LLM hallucinated instead of following instructions.
+# Each is a (regex_pattern, human_readable_description) tuple.
+_HALLUCINATION_PATTERNS = [
+    (r"^\s*import\s+\w+",           "import statement (no imports are allowed)"),
+    (r"^\s*from\s+\w+\s+import",    "from-import statement (no imports are allowed)"),
+    (r"\bDroneClient\s*\(",         "DroneClient() constructor (client is already defined)"),
+    (r"\bDrone\s*\(",               "Drone() constructor (client is already defined)"),
+    (r"\bWorld\s*\(",               "World() constructor (not available in this namespace)"),
+    (r"\bProjectAirSimClient\s*\(", "ProjectAirSimClient() constructor (not available)"),
+    (r"\bairsim\.",                 "airsim module access (no modules are available)"),
+    (r"\bdrone\.\w+\s*\(",          "drone.method() call (use skill functions directly, not module notation)"),
+    (r"\bclient\s*=\s*\w+\s*\(",   "client reassignment (client is already defined, do not redefine it)"),
+]
 
 
 @dataclass
@@ -26,14 +43,32 @@ class ExecutionResult:
     traceback: str | None = None
 
 
+def _validate_code(code: str) -> str | None:
+    """
+    Scan generated code for hallucination patterns before running it.
+
+    Returns a human-readable error string if a problem is found,
+    or None if the code looks safe to run.
+    """
+    for line in code.splitlines():
+        for pattern, description in _HALLUCINATION_PATTERNS:
+            if re.search(pattern, line):
+                return (
+                    f"Generated code contains a forbidden pattern: {description}.\n"
+                    f"Offending line: {line.strip()}\n"
+                    f"Only use the skill functions listed in the system prompt. "
+                    f"The variable `client` is already defined — do not create or import anything."
+                )
+    return None
+
+
 def execute_code(client: DroneClient, code: str) -> ExecutionResult:
     """
-    Execute generated Python code in a sandboxed namespace.
+    Validate then execute generated Python code in a sandboxed namespace.
 
     The namespace contains:
-        - client         : the live DroneClient
-        - drone          : alias of client for compatibility
-        - all skill functions from skills.registry
+        client              the live connected DroneClient
+        all skill functions from skills.registry
 
     Args:
         client: Connected DroneClient passed to every skill call.
@@ -42,6 +77,16 @@ def execute_code(client: DroneClient, code: str) -> ExecutionResult:
     Returns:
         ExecutionResult with success flag, captured prints, and any error.
     """
+    # Validate before executing
+    validation_error = _validate_code(code)
+    if validation_error:
+        logger.error("Code validation failed: %s", validation_error)
+        return ExecutionResult(
+            success=False,
+            code=code,
+            error=validation_error,
+        )
+
     captured: list[str] = []
 
     def _print(*args, **kwargs):
@@ -51,17 +96,16 @@ def execute_code(client: DroneClient, code: str) -> ExecutionResult:
 
     namespace: dict = {
         "client": client,
-        # Some models still emit `drone` as the connected client variable.
-        # Keep this as a compatibility alias while the prompt steers them to `client`.
-        "drone": client,
         "print": _print,
-        "__builtins__": {"len": len, "range": range, "int": int, "float": float,
-                         "str": str, "list": list, "dict": dict, "bool": bool,
-                         "True": True, "False": False, "None": None,
-                         "enumerate": enumerate, "zip": zip, "max": max, "min": min,
-                         "abs": abs, "round": round, "isinstance": isinstance,
-                         "Exception": Exception, "ValueError": ValueError,
-                         "RuntimeError": RuntimeError},
+        "__builtins__": {
+            "len": len, "range": range, "int": int, "float": float,
+            "str": str, "list": list, "dict": dict, "bool": bool,
+            "True": True, "False": False, "None": None,
+            "enumerate": enumerate, "zip": zip, "max": max, "min": min,
+            "abs": abs, "round": round, "isinstance": isinstance,
+            "Exception": Exception, "ValueError": ValueError,
+            "RuntimeError": RuntimeError,
+        },
     }
     namespace.update(get_skill_functions())
 
